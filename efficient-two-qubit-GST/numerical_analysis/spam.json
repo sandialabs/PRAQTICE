@@ -1,0 +1,34 @@
+{
+    "prep": {
+        "SX": {
+            "type": "static",
+            "value": 1e-4
+        },
+        "SY": {
+            "type": "link",
+            "gate": "prep",
+            "term": "SX"
+        },
+        "SZ": {
+            "type": "link",
+            "gate": "prep",
+            "term": "SX"
+        }
+    },
+    "povm": {
+        "SX": {
+            "type": "static",
+            "value": 1e-4
+        },
+        "SY": {
+            "type": "link",
+            "gate": "povm",
+            "term": "SX"
+        },
+        "SZ": {
+            "type": "link",
+            "gate": "povm",
+            "term": "SX"
+        }
+    }
+}

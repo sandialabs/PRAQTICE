@@ -1,0 +1,89 @@
+{
+    "Gxpi2_0": {
+        "SXI": {
+            "type": "static",
+            "value": 1e-4
+        },
+        "SYI": {
+			"type": "static",
+            "value": 1e-4
+        },
+        "SZI": {
+			"type": "static",
+            "value": 1e-4
+        }
+    },
+    "Gypi2_0": {
+        "SXI": {
+			"type": "static",
+            "value": 1e-4
+        },
+        "SYI": {
+			"type": "static",
+            "value": 1e-4
+        },
+        "SZI": {
+			"type": "static",
+            "value": 1e-4
+        }
+    },
+    "Gxpi2_1": {
+        "SIX": {
+			"type": "static",
+            "value": 1e-4
+        },
+        "SIY": {
+			"type": "static",
+            "value": 1e-4
+        },
+        "SIZ": {
+			"type": "static",
+            "value": 1e-4
+        }
+    },
+    "Gypi2_1": {
+        "SIX": {
+			"type": "static",
+            "value": 1e-4
+        },
+        "SIY": {
+			"type": "static",
+            "value": 1e-4
+        },
+        "SIZ": {
+			"type": "static",
+            "value": 1e-4
+        }
+    },
+    "Gcphase": {
+        "SIX": {
+			"type": "static",
+			"value": 1e-3
+        },
+        "SIY": {
+            "type": "link",
+            "gate": "Gcphase",
+            "term": "SIX"
+        },
+        "SIZ": {
+            "type": "link",
+            "gate": "Gcphase",
+            "term": "SIX"
+        },
+        "SXI": {
+            "type": "link",
+            "gate": "Gcphase",
+            "term": "SIX"
+        },
+        "SYI": {
+            "type": "link",
+            "gate": "Gcphase",
+            "term": "SIX"
+        },
+        "SZI": {
+            "type": "link",
+            "gate": "Gcphase",
+            "term": "SIX"
+		}
+    }
+}

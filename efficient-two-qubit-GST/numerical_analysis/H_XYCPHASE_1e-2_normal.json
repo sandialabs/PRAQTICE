@@ -1,0 +1,64 @@
+{
+    "Gxpi2_0": {
+        "HXI": {
+            "type": "normal",
+            "scale": 1e-2
+        },
+        "HYI": {
+            "type": "normal",
+            "scale": 1e-2
+        },
+        "HZI": {
+            "type": "normal",
+            "scale": 1e-2
+        }
+    },
+    "Gxpi2_1": {
+        "HIX": {
+            "type": "normal",
+            "scale": 1e-2
+        },
+        "HIY": {
+            "type": "normal",
+            "scale": 1e-2
+        },
+        "HIZ": {
+            "type": "normal",
+            "scale": 1e-2
+        }
+    },
+    "Gypi2_0": {
+        "HXI": {
+            "type": "normal",
+            "scale": 1e-2
+        },
+        "HYI": {
+            "type": "normal",
+            "scale": 1e-2
+        },
+        "HZI": {
+            "type": "normal",
+            "scale": 1e-2
+        }
+    },
+    "Gypi2_1": {
+        "HIX": {
+            "type": "normal",
+            "scale": 1e-2
+        },
+        "HIY": {
+            "type": "normal",
+            "scale": 1e-2
+        },
+        "HIZ": {
+            "type": "normal",
+            "scale": 1e-2
+        }
+    },
+    "Gcphase": {
+        "all H": {
+            "type": "normal",
+            "scale": 1e-2
+        }
+    }
+}

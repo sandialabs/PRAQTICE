@@ -1,0 +1,44 @@
+{
+    "Gxpi2": {
+        "HX": {
+            "type": "normal",
+            "scale": 1e-2
+        },
+		"HY": {
+            "type": "normal",
+            "scale": 1e-2
+        },
+		"HZ": {
+            "type": "normal",
+            "scale": 1e-2
+        }
+    },
+    "Gypi2": {
+        "HX": {
+            "type": "normal",
+            "scale": 1e-2
+        },
+		"HY": {
+            "type": "normal",
+            "scale": 1e-2
+        },
+		"HZ": {
+            "type": "normal",
+            "scale": 1e-2
+        }
+    },
+	"[]": {
+        "HX": {
+            "type": "normal",
+            "scale": 1e-2
+        },
+		"HY": {
+            "type": "normal",
+            "scale": 1e-2
+        },
+		"HZ": {
+            "type": "normal",
+            "scale": 1e-2
+        }
+    }
+}

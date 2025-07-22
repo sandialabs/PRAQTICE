@@ -1,0 +1,64 @@
+{
+    "prep": {
+        "SIX": {
+            "type": "static",
+            "value": 1e-3
+        },
+        "SIY": {
+            "type": "link",
+            "gate": "prep",
+            "term": "SIX"
+        },
+        "SIZ": {
+            "type": "link",
+            "gate": "prep",
+            "term": "SIX"
+        },
+        "SXI": {
+            "type": "link",
+            "gate": "prep",
+            "term": "SIX"
+        },
+        "SYI": {
+            "type": "link",
+            "gate": "prep",
+            "term": "SIX"
+        },
+        "SZI": {
+            "type": "link",
+            "gate": "prep",
+            "term": "SIX"
+        }
+    },
+    "povm": {
+        "SIX": {
+            "type": "static",
+            "value": 1e-3
+        },
+        "SIY": {
+            "type": "link",
+            "gate": "povm",
+            "term": "SIX"
+        },
+        "SIZ": {
+            "type": "link",
+            "gate": "povm",
+            "term": "SIX"
+        },
+        "SXI": {
+            "type": "link",
+            "gate": "povm",
+            "term": "SIX"
+        },
+        "SYI": {
+            "type": "link",
+            "gate": "povm",
+            "term": "SIX"
+        },
+        "SZI": {
+            "type": "link",
+            "gate": "povm",
+            "term": "SIX"
+        }
+    }
+}

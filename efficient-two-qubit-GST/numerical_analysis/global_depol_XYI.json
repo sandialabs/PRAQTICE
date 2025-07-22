@@ -1,0 +1,52 @@
+{
+    "[]": {
+        "SX": {
+            "type": "static",
+            "value": 1e-3
+        },
+        "SY": {
+            "type": "link",
+            "gate": "[]",
+            "term": "SX"
+        },
+        "SZ": {
+            "type": "link",
+            "gate": "[]",
+            "term": "SX"
+        }
+    },
+    "Gxpi2": {
+        "SX": {
+            "type": "link",
+            "gate": "[]",
+            "term": "SX"
+        },
+        "SY": {
+            "type": "link",
+            "gate": "[]",
+            "term": "SX"
+        },
+        "SZ": {
+            "type": "link",
+            "gate": "[]",
+            "term": "SX"
+        }
+    },
+    "Gypi2": {
+        "SX": {
+            "type": "link",
+            "gate": "[]",
+            "term": "SX"
+        },
+        "SY": {
+            "type": "link",
+            "gate": "[]",
+            "term": "SX"
+        },
+        "SZ": {
+            "type": "link",
+            "gate": "[]",
+            "term": "SX"
+        }
+    }
+}
