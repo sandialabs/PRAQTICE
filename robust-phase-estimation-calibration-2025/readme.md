@@ -2,9 +2,7 @@ This is the readme file for the supplemental material to be used in conjunction 
 paper "Heisenberg-limited calibration of entangling gates with robust phase estimation",
 which can be found here:  https://arxiv.org/abs/2502.06698.
 
-0.  Table of Contents
-
-    0.  Table of Contents
+    Table of Contents
     1.  Folder contents
     2.  Installation instructions
 
@@ -27,11 +25,17 @@ any environments you may already be using.  Instructions here use venv but other
 (e.g., conda) should work just fine.  Terminal instructions are as follows:
 
 cd /path/to/robust-phase-estimation-calibration-2025
+
 python -m venv rpe
+
 source rpe_venv/bin/activate
+
 pip install --upgrade pip
+
 pip install requirements.txt
+
 pip install ipykernel
+
 python -m ipykernel install --user --name=rpe
 
 Note that this will install both pyRPE, which performs the RPE analysis, and pygsti which 
