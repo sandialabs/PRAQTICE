@@ -1,0 +1,1 @@
+{"cutoff": 0.85, "num_hops": 2, "max_error_weight": 2, "geometry": "ring", "num_qubits": 4, "num_channels": 11, "measurement_encoding": 0}
