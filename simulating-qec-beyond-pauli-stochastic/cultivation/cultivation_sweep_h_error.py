@@ -41,12 +41,12 @@ num_processes = 20
 n_shots = 100000000 #set this number much larger to get good statistics for relevant error rates; small for testing
 n_runs = 100 #run more times to collect more samples
 h_fractions = np.linspace(1,0, num=20) #np.linspace(1,0, num=20) #fraction of generator infidelity allocated to coherent error 
-strength = 1#1.6#1.4 #overall scale factor for gate generator infidelities in the error model
+strength = 1 #overall scale factor for gate generator infidelities in the error model
 
 incl_spam = True
 #rate of bit flip error on each qubit for prep/measure
 if incl_spam:
-    spam_error = 0.001 #*strength#0.0015
+    spam_error = 0.001*strength
 else:
     spam_error = 0 
 
