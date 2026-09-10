@@ -1,0 +1,11 @@
+{
+    "descriptor": [
+        "transversal",
+        "surface-code-d=9-PQ=10000",
+        "simulation",
+        "fault_tolerant"
+    ],
+    "long descriptor": "transversal surface-code-d=9-PQ=10000 simulation fault_tolerant",
+    "experiment type": "QUOPS",
+    "file": "data.csv"
+}

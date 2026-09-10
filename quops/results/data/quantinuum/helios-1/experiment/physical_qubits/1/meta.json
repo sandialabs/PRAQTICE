@@ -1,0 +1,12 @@
+{
+    "descriptor": [
+        "quantinuum",
+        "helios-1",
+        "experiment",
+        "physical_qubits",
+        "1"
+    ],
+    "long descriptor": "Experimental data from computation on physical qubits on Helios-1 without using leakage post-selection. Data is the same as the `physical-ps` directory data but without post-selection applied.",
+    "experiment type": "QUOPS",
+    "file": "data.csv"
+}

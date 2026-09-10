@@ -1,0 +1,10 @@
+{
+    "descriptor": [
+        "transversal",
+        "combined-PQ=10000",
+        "simulation",
+        "fault_tolerant",
+        "1"
+    ],
+    "long descriptor": "Transversal architecture with d = 3, 5, 7, 9 surface code or CSD code and PQ=10000"
+}

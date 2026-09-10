@@ -1,0 +1,12 @@
+{
+    "descriptor": [
+        "flasq",
+        "25000PQ_0.001",
+        "simulation",
+        "fault_tolerant",
+        "1"
+    ],
+    "long descriptor": "FLASQ simulations with 25000 physical qubits and 0.1% error rate",
+    "experiment type": "QUOPS",
+    "file": "data.csv"
+}

@@ -1,0 +1,12 @@
+{
+    "descriptor": [
+        "ibm",
+        "ibm_boston",
+        "experiment",
+        "physical_qubits",
+        "1"
+    ],
+    "long descriptor": "Experimental data from IBM's ibm_boston experiment on 06/29/2026.",
+    "experiment type": "QUOPS",
+    "file": "data.csv"
+}
