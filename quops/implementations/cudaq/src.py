@@ -5,8 +5,8 @@ compilation; MCFE caps; noise models; statistical inference; scores and rates;
 scan scheduling; plotting; reproducible physical acquisition; logical
 resource displays; inference calibration; command-line tools.
 
-The notebook keeps its CUDA-Q demo definitions visible and explicitly imports
-the supporting functions it uses. All regression tests live in tests.py.
+The notebook keeps its CUDA-Q demo definitions visible and imports the public
+supporting functions listed in __all__. All regression tests live in tests.py.
 Logical programs stay visible in the notebook; the helpers here display their
 already-compiled resource counts without requiring Logical at module import.
 
@@ -14,9 +14,10 @@ QUOPS estimates mean process polarization over a random circuit ensemble.
 Its mirror estimator relies on the reference-compiler assumptions discussed
 in the paper. The implemented ratio of ensemble means is approximate;
 sampling confidence bounds do not remove its model or normalization bias.
-The tutorial uses the paper's gated score tests and Hochberg capability-region
-tests with normal/bootstrap uncertainty. Legacy fixed-family archive analysis
-retains its Bonferroni adjustment and conservative degenerate-data fallback.
+The tutorial uses normal/bootstrap uncertainty and Hochberg shape tests.
+Separate summary helpers support gated score and Hochberg capability-region
+tests. Legacy fixed-family archive analysis retains its Bonferroni adjustment
+and conservative degenerate-data fallback.
 
 Run a physical scan with ``python src.py --help``; run the known-channel
 inference calibration with ``python src.py calibrate --help``.
@@ -1011,7 +1012,7 @@ def make_helios1_noise(gate_error_1q: float = 2.50e-5, gate_error_2q: float = 7.
 # mirror (Eq. (39)); MCFE combines its ensemble means to infer the target.
 # The standard threshold is gamma_0 = 1/sqrt(e), per SI Eqs. (16)--(17).
 # Normal and percentile confidence procedures below remain approximate under
-# the MCFE assumptions. The complete predeclared scan uses Bonferroni shares.
+# the MCFE assumptions. Archive summaries use Bonferroni shares by default.
 # ===========================================================================
 
 QUOPS_THRESHOLD = 1.0 / math.sqrt(math.e)
@@ -1233,6 +1234,19 @@ class ShapePolarizationData:
         return mcfe_polarization(self.br, self.rr, self.ref, estimator)
 
 
+def _resample_mcfe_components(circuit_means, ref, rng, *, resamples=None):
+    """Draw paired BR/RR circuit clusters and an independent REF mean.
+
+    One draw at a time preserves the archive bootstrap's interleaved RNG
+    stream. A batch preserves the notebook's circuit-first, REF-second stream.
+    Callers retain their estimator and denominator-failure policies.
+    """
+    num_circuits, num_ref = len(circuit_means), len(ref)
+    circuit_indices = rng.integers(0, num_circuits, size=num_circuits if resamples is None else (resamples, num_circuits))
+    ref_indices = rng.integers(0, num_ref, size=num_ref if resamples is None else (resamples, num_ref))
+    return circuit_means[circuit_indices], ref[ref_indices].mean(axis=-1)
+
+
 def bootstrap_polarization(data: ShapePolarizationData, *, estimator: str = "ratio_of_means", resamples: int = 2000, seed=None) -> np.ndarray:
     """Resample whole independent circuit clusters jointly for M1 and M2.
 
@@ -1252,16 +1266,20 @@ def bootstrap_polarization(data: ShapePolarizationData, *, estimator: str = "rat
     draws = np.empty(resamples, dtype=float)
     br = np.asarray([np.mean(group) for group in data.br], dtype=float)
     rr = np.asarray([np.mean(group) for group in data.rr], dtype=float)
+    circuit_means = np.column_stack((br, rr))
     ref = np.asarray(data.ref, dtype=float)
     for draw_index in range(resamples):
-        circuit_choice = rng.integers(0, data.num_circuits, size=data.num_circuits)
-        reference_mean = float(ref[rng.integers(0, ref.size, size=ref.size)].mean())
+        sampled, reference_mean = _resample_mcfe_components(circuit_means, ref, rng)
+        reference_mean = float(reference_mean)
+
+        # Keep contiguous component arrays so floating-point reductions match archived draws.
+        sampled_br, sampled_rr = sampled[:, 0].copy(), sampled[:, 1].copy()
         if estimator == "ratio_of_means":
-            draws[draw_index] = normalized_mcfe_polarization(float(br[circuit_choice].mean()), float(rr[circuit_choice].mean()), reference_mean)
-        elif reference_mean <= 1.0e-12 or np.any(rr[circuit_choice] <= 1.0e-12):
+            draws[draw_index] = normalized_mcfe_polarization(float(sampled_br.mean()), float(sampled_rr.mean()), reference_mean)
+        elif reference_mean <= 1.0e-12 or np.any(sampled_rr <= 1.0e-12):
             draws[draw_index] = float("nan")
         else:
-            draws[draw_index] = float(np.mean(br[circuit_choice] / np.sqrt(rr[circuit_choice] * reference_mean)))
+            draws[draw_index] = float(np.mean(sampled_br / np.sqrt(sampled_rr * reference_mean)))
     return draws
 
 
@@ -1409,6 +1427,188 @@ def pass_statistics(data: ShapePolarizationData, *, estimator: str = "ratio_of_m
 
 
 # ===========================================================================
+# Notebook DataFrame inference
+# ===========================================================================
+
+def _normal_p_values(estimates, sigmas, threshold):
+    """Evaluate valid one-sided normal tests without cancellation in small tails."""
+    with np.errstate(over="ignore"):
+        z = (np.asarray(estimates, dtype=float) - np.asarray(threshold, dtype=float)) / np.asarray(sigmas, dtype=float)
+    return np.asarray([0.5 * math.erfc(value / math.sqrt(2.0)) for value in z])
+
+
+def _hochberg_adjusted_p_values(p_values: pd.Series) -> pd.Series:
+    """Adjust a complete family's p-values, preserving missing hypotheses as p=1."""
+    ordered = p_values.fillna(1.0).sort_values(kind="stable")
+    scaled = ordered.to_numpy(dtype=float) * np.arange(len(ordered), 0, -1)
+    adjusted = np.minimum(1.0, np.minimum.accumulate(scaled[::-1])[::-1])
+    return pd.Series(adjusted, index=ordered.index).reindex(p_values.index)
+
+
+def calculate_gamma_lower(gamma_for_each_shape: pd.DataFrame, sigma_for_each_shape: pd.DataFrame) -> pd.DataFrame:
+    """Match shapes, calculate one-sided 95% lower bounds and classify individual tests."""
+    result = gamma_for_each_shape.merge(sigma_for_each_shape[["width", "size", "sigma"]], on=["width", "size"], how="left", validate="one_to_one")
+    result["gamma_lower"] = result["gamma_hat_ws"] - 1.6448536269514722 * result["sigma"]
+    result["threshold"] = QUOPS_THRESHOLD
+    valid_test = np.isfinite(result[["gamma_hat_ws", "sigma", "gamma_lower"]]).all(axis=1) & result["sigma"].gt(0.0)
+    result["passes"] = valid_test & result["gamma_lower"].ge(result["threshold"])
+    result["decision"] = np.where(valid_test, np.where(result["passes"], "Pass", "Fail"), "Invalid")
+    return result
+
+def _validate_test_shapes(data: pd.DataFrame, name: str) -> None:
+    """Require one row per positive integer (width, size) without silently dropping shapes."""
+    if not {"width", "size"}.issubset(data.columns):
+        raise ValueError(f"{name} requires width and size columns")
+    for column in ("width", "size"):
+        data[column].map(lambda value: _positive_integer(column, value))
+    if data.duplicated(["width", "size"]).any():
+        raise ValueError(f"{name} contains duplicate shapes")
+
+def calculate_p_value(gamma_for_each_shape: pd.DataFrame, sigma_for_each_shape: pd.DataFrame) -> pd.DataFrame:
+    """Return SI Eq. (61)'s one-sided normal p-values, matched by (width, size).
+
+    Test the null that mean polarization is below 1/sqrt(e). Missing or
+    nonfinite estimates and nonpositive sigma yield NaN p-values and
+    test_valid=False. The outer join retains shapes missing either estimate.
+    """
+    _validate_test_shapes(gamma_for_each_shape, "gamma_for_each_shape")
+    _validate_test_shapes(sigma_for_each_shape, "sigma_for_each_shape")
+    result = gamma_for_each_shape.merge(sigma_for_each_shape[["width", "size", "sigma"]], on=["width", "size"], how="outer", validate="one_to_one")
+    result["threshold"] = QUOPS_THRESHOLD
+    result["test_valid"] = np.isfinite(result[["gamma_hat_ws", "sigma"]]).all(axis=1) & result["sigma"].gt(0.0)
+    result["p_value"] = np.nan
+
+    result.loc[result["test_valid"], "p_value"] = _normal_p_values(result.loc[result["test_valid"], "gamma_hat_ws"], result.loc[result["test_valid"], "sigma"], QUOPS_THRESHOLD)
+    return result
+
+def hochberg_test(p_value_for_each_shape: pd.DataFrame, alpha: float = 0.05, *, declared_shapes: Iterable[dict] | pd.DataFrame | None = None) -> pd.DataFrame:
+    """Apply SI Eq. (67) to one complete family and return every shape's decision.
+
+    Use all planned shapes, chosen independently of the test data. Supplying
+    declared_shapes retains missing shapes as Invalid; otherwise the input
+    rows define the family. Invalid tests occupy a place with p=1 for the
+    adjustment and cannot pass. Do not filter to individual passes first.
+    Hochberg's FWER control assumes valid p-values and independence or the
+    positive dependence described in the paper. This helper does not gate
+    a score sequence or combine separate score and region error budgets.
+    """
+    alpha = _probability("alpha", alpha)
+    _validate_test_shapes(p_value_for_each_shape, "p_value_for_each_shape")
+    if "p_value" not in p_value_for_each_shape:
+        raise ValueError("p_value_for_each_shape requires a p_value column")
+    result = p_value_for_each_shape.copy()
+    if declared_shapes is not None:
+        declared = pd.DataFrame(declared_shapes)
+        _validate_test_shapes(declared, "declared_shapes")
+        supplied = set(result[["width", "size"]].itertuples(index=False, name=None))
+        planned = set(declared[["width", "size"]].itertuples(index=False, name=None))
+        if not supplied.issubset(planned):
+            raise ValueError("p-values contain shapes outside declared_shapes")
+        result = declared[["width", "size"]].merge(result, on=["width", "size"], how="left", validate="one_to_one")
+    if result.empty:
+        raise ValueError("Hochberg requires at least one declared shape")
+    result = result.reset_index(drop=True)
+    p_values = pd.to_numeric(result["p_value"], errors="raise")
+    if (p_values.notna() & ~p_values.between(0.0, 1.0)).any():
+        raise ValueError("p-values must be in [0, 1] or NaN for invalid tests")
+    valid = p_values.notna()
+    if "test_valid" in result:
+        valid &= result["test_valid"].eq(True)
+    result["p_value"] = p_values
+    result["test_valid"] = valid
+
+    # Every declared hypothesis participates, including invalid cases with p=1.
+    result["adjusted_p_value"] = _hochberg_adjusted_p_values(p_values.where(valid, 1.0))
+    result["passes"] = valid & result["adjusted_p_value"].le(alpha)
+    result["decision"] = np.where(valid, np.where(result["passes"], "Pass", "Fail"), "Invalid")
+    result["alpha"] = alpha
+    result["family_size"] = len(result)
+    result["multiplicity"] = "hochberg"
+    if "threshold" in result:
+        result["threshold"] = result["threshold"].fillna(QUOPS_THRESHOLD)
+    else:
+        result["threshold"] = QUOPS_THRESHOLD
+    return result
+
+def _validate_lambda_observations(data: pd.DataFrame) -> None:
+    """Require finite observations and balanced circuit clusters before inference."""
+    columns = ["width", "size", "circuit_index", "lambda_br", "lambda_rr", "lambda_ref"]
+    missing = set(columns) - set(data.columns)
+    if missing:
+        raise ValueError(f"data is missing required columns: {sorted(missing)}")
+    if data.empty or data[columns].isna().any().any():
+        raise ValueError("data must contain nonmissing shape, circuit and lambda observations")
+    if not np.isfinite(data[["lambda_br", "lambda_rr", "lambda_ref"]].to_numpy(dtype=float)).all():
+        raise ValueError("lambda observations must be finite")
+    for column in ("width", "size", "circuit_index"):
+        validator = _nonnegative_integer if column == "circuit_index" else _positive_integer
+        data[column].map(lambda value: validator(column, value))
+    if "mirror_index" in data:
+        data["mirror_index"].map(lambda value: _nonnegative_integer("mirror_index", value))
+        if data.duplicated(["width", "size", "circuit_index", "mirror_index"]).any():
+            raise ValueError("data contains duplicate circuit/mirror observations")
+    mirror_counts = data.groupby(["width", "size", "circuit_index"]).size()
+    if mirror_counts.groupby(level=["width", "size"]).nunique().gt(1).any():
+        raise ValueError("Each shape must have the same number of mirrors for every original circuit; complete the acquisition before analysis.")
+
+def calculate_mean_lambdas(data: pd.DataFrame) -> pd.DataFrame:
+    """Average finite lambdas for each shape, requiring equal mirror counts per circuit."""
+    _validate_lambda_observations(data)
+    return data.groupby(["width", "size"], as_index=False).agg(mean_lambda_br=("lambda_br", "mean"), mean_lambda_rr=("lambda_rr", "mean"), mean_lambda_ref=("lambda_ref", "mean"))
+
+def calculate_gamma_hat_ws(mean_data: pd.DataFrame) -> pd.DataFrame:
+    """Calculate the estimated mean process polarization for each shape."""
+    result = mean_data.copy()
+    result["gamma_hat_ws"] = [normalized_mcfe_polarization(br, rr, ref) for br, rr, ref in result[["mean_lambda_br", "mean_lambda_rr", "mean_lambda_ref"]].itertuples(index=False, name=None)]
+    return result
+
+def calculate_quops_rate(data: pd.DataFrame, gamma_for_each_shape: pd.DataFrame) -> pd.DataFrame:
+    """Return simulator QUOPS/s from each shape's summed BR/RR time and shots, assuming no discarded shots."""
+    measurements = data[["width", "size", "br_rr_seconds", "m1_m2_shots"]].copy()
+    measurements["m1_m2_shots"] = measurements["m1_m2_shots"].map(lambda value: _nonnegative_integer("m1_m2_shots", value))
+    if not np.isfinite(measurements["br_rr_seconds"]).all() or not measurements["br_rr_seconds"].gt(0.0).all():
+        raise ValueError("br_rr_seconds must contain finite, positive sampling times")
+
+    # Sum every BR/RR observation before matching its shape's gamma; REF time and shots are excluded.
+    totals = measurements.groupby(["width", "size"], as_index=False).agg(tau_wall_seconds=("br_rr_seconds", "sum"), m1_m2_shots=("m1_m2_shots", "sum"))
+    result = totals.merge(gamma_for_each_shape[["width", "size", "gamma_hat_ws"]], on=["width", "size"], how="left", validate="one_to_one")
+
+    # Use the measured gamma directly, including sampling fluctuations above one; undefined or negative estimates yield NaN.
+    result["omega_simulated"] = [omega_simulated(size, gamma, seconds, shots) if np.isfinite(gamma) and gamma >= 0.0 else np.nan for size, gamma, seconds, shots in result[["size", "gamma_hat_ws", "tau_wall_seconds", "m1_m2_shots"]].itertuples(index=False, name=None)]
+    return result
+
+def calculate_sigma(data: pd.DataFrame, bootstrap_resamples: int = 2000, seed: int = 2026) -> pd.DataFrame:
+    """Estimate gamma uncertainty from saved lambdas, separately for each shape."""
+    _validate_lambda_observations(data)
+    bootstrap_resamples = _positive_integer("bootstrap_resamples", bootstrap_resamples)
+    if bootstrap_resamples < 2:
+        raise ValueError("At least two bootstrap resamples are required to estimate uncertainty.")
+    rng = np.random.default_rng(seed)
+    rows = []
+
+    for (width, size), group in data.groupby(["width", "size"]):
+        circuit_means = group.groupby("circuit_index")[["lambda_br", "lambda_rr"]].mean().to_numpy()
+        ref_lambdas = group["lambda_ref"].to_numpy()
+        num_circuits = len(circuit_means)
+        if num_circuits < 2:
+            raise ValueError("At least two independent original circuits are needed to estimate uncertainty.")
+
+        # Preserve paired circuit clusters, independent REF draws and the notebook's batch RNG order.
+        sampled, bootstrap_ref = _resample_mcfe_components(circuit_means, ref_lambdas, rng, resamples=bootstrap_resamples)
+        bootstrap_means = sampled.mean(axis=1)
+        bootstrap_br = bootstrap_means[:, 0]
+        bootstrap_rr = bootstrap_means[:, 1]
+
+        # Recalculate gamma for every bootstrap sample and measure its spread.
+        if np.any(bootstrap_rr <= 0) or np.any(bootstrap_ref <= 0):
+            raise ValueError("Nonpositive bootstrap RR/REF means prevent a reliable gamma uncertainty estimate.")
+        bootstrap_gamma = bootstrap_br / np.sqrt(bootstrap_rr * bootstrap_ref)
+        rows.append({"width": width, "size": size, "sigma": float(np.std(bootstrap_gamma, ddof=1))})
+
+    return pd.DataFrame(rows)
+
+
+# ===========================================================================
 # QUOPS scores and operational rates
 # ===========================================================================
 
@@ -1478,6 +1678,9 @@ def quops_rate(size: int, gamma: float, tau_wall: float, m1_m2_shots: int, *, ke
     gamma must be estimated on accepted data under a justified protocol; this
     rate helper does not define an acceptance rule or validate that protocol.
 
+    ``gamma`` is a point estimate. Sampling fluctuations can put it above one;
+    Eq. (72) uses that estimate directly, without clipping or discarding it.
+
     For an operational hardware result, ``tau_wall`` should cover acquisition
     of all M1/M2 data, including unavoidable execution-system overhead, while
     excluding cloud queue and data-transfer time.  Width-only M3 acquisition may
@@ -1498,8 +1701,8 @@ def quops_rate(size: int, gamma: float, tau_wall: float, m1_m2_shots: int, *, ke
     gamma = float(gamma)
     if not math.isfinite(gamma):
         return float("nan")
-    if not 0.0 <= gamma <= 1.0:
-        raise ValueError("gamma used for a physical rate must lie in [0, 1]")
+    if gamma < 0.0:
+        raise ValueError("gamma used for a rate must be non-negative")
     return float(2.0 * size * gamma**2 * math.sqrt(m1_m2_shots * kept_shots) / tau_wall)
 
 
@@ -1524,7 +1727,7 @@ def _default_shape_schedule_from_layer_pairs(shapes: Iterable[dict] | Sequence[i
 
     The paper permits a user-specified shape-selection algorithm and a strategy
     for allocating the 5% familywise error budget.  This deterministic order is
-    used by the minimal notebook to acquire the complete predeclared family.
+    used by archive acquisition to collect the complete predeclared family.
     ``summarize_quops_runs`` applies a Bonferroni allocation, so the result does
     not depend on adaptive stopping. Per-shape coverage remains approximate.
 
@@ -1658,7 +1861,7 @@ def _summarize_quops_runs_from_layer_pairs(run_df: pd.DataFrame, *, familywise_a
         stats["tau_wall_seconds"] = float(group["br_rr_seconds"].sum())
         stats["m1_m2_shots"] = sum(int(value) for value in group["m1_m2_shots"])
         stats["m1_m2_kept_shots"] = sum(int(value) for value in group["m1_m2_kept_shots"]) if "m1_m2_kept_shots" in group.columns else stats["m1_m2_shots"]
-        stats["omega_simulated"] = omega_simulated(size, stats["mean_polarization"], stats["tau_wall_seconds"], stats["m1_m2_shots"], kept_shots=stats["m1_m2_kept_shots"]) if np.isfinite(stats["mean_polarization"]) and 0.0 <= stats["mean_polarization"] <= 1.0 else np.nan
+        stats["omega_simulated"] = omega_simulated(size, stats["mean_polarization"], stats["tau_wall_seconds"], stats["m1_m2_shots"], kept_shots=stats["m1_m2_kept_shots"]) if np.isfinite(stats["mean_polarization"]) and stats["mean_polarization"] >= 0.0 else np.nan
         stats["measured"] = True
         summaries.append(stats)
     for shape in declared or ():
@@ -1812,10 +2015,10 @@ def _apply_paper_quops_tests(summary, score_sequence, alpha):
     indices = {(int(row["width"]), int(row["size"])): index for index, row in result.iterrows()}
     valid = result["measured"].fillna(False).eq(True) & result["decision"].ne("invalid") & np.isfinite(result["mean_polarization"]) & np.isfinite(result["bootstrap_stderr"]) & result["bootstrap_stderr"].gt(0.0) & result.get("bootstrap_valid_fraction", pd.Series(np.nan, index=result.index)).eq(1.0)
     result["p_value"] = np.nan
+    result.loc[valid, "p_value"] = _normal_p_values(result.loc[valid, "mean_polarization"], result.loc[valid, "bootstrap_stderr"], result.loc[valid, "threshold"])
     result["interval_fallback"] = "none"
     for index in result.index[valid]:
         row = result.loc[index]
-        result.loc[index, "p_value"] = NormalDist().cdf((row["threshold"] - row["mean_polarization"]) / row["bootstrap_stderr"])
         result.loc[index, ["polarization_lower", "bootstrap_lower"]] = row["mean_polarization"] - NormalDist().inv_cdf(1.0 - alpha) * row["bootstrap_stderr"]
     result["adjusted_p_value"] = np.nan
     result["test_family"] = "Hochberg (R)"
@@ -1843,10 +2046,7 @@ def _apply_paper_quops_tests(summary, score_sequence, alpha):
     # Eq. (67): step up over all of R; invalid/missing cases keep their places with p=1.
     remaining = result.index[result["test_family"].eq("Hochberg (R)")]
     if len(remaining):
-        ordered = result.loc[remaining, "p_value"].fillna(1.0).sort_values(kind="stable")
-        scaled = ordered.to_numpy() * np.arange(len(ordered), 0, -1)
-        adjusted = np.minimum(1.0, np.minimum.accumulate(scaled[::-1])[::-1])
-        result.loc[ordered.index, "adjusted_p_value"] = adjusted
+        result.loc[remaining, "adjusted_p_value"] = _hochberg_adjusted_p_values(result.loc[remaining, "p_value"])
         result.loc[remaining, "tested"] = True
         for index in remaining:
             passed = bool(valid.loc[index] and result.loc[index, "adjusted_p_value"] <= alpha)
@@ -1902,26 +2102,84 @@ def _paper_plot_axes(ax, *, numeric_ticks=False):
     ax.set_axisbelow(True)
 
 
-def plot_quops_scan(summary_df: pd.DataFrame, *, title: str = "QUOPS capability", label: str | None = None, pass_column: str = "passes", threshold: float | None = None, jitter_seed: int = 123, shape_figsize: tuple[float, float] = (9.0, 4.8), polarization_figsize: tuple[float, float] = (9.0, 4.2), dpi: int = 140, ax=None):
-    """Plot measured capability points and polarization-versus-size diagnostics.
+def _highlight_quops_point(ax, x: float, y: float, text: str, *, gid: str, legend_label: str, label_position: tuple[float, float] | None = None) -> None:
+    """Mark the selected shape and place its numerical label toward the plot interior."""
+    ax.scatter([x], [y], s=165, marker="D", facecolors="#4B7600", edgecolors="#203400", linewidths=1.3, label=legend_label, zorder=6).set_gid(gid)
+    fraction_x, fraction_y = ax.transAxes.inverted().transform(ax.transData.transform((x, y)))
+    offset_x = 26 if fraction_x < 0.45 else -26
+    offset_y = 34 if fraction_y < 0.5 else -34
+    text_position = (offset_x, offset_y) if label_position is None else label_position
+    text_coordinates = "offset points" if label_position is None else "axes fraction"
+    horizontal = "left" if label_position is None and offset_x > 0 else "right"
+    vertical = "bottom" if label_position is None and offset_y > 0 else "top"
+    ax.annotate(text, xy=(x, y), xytext=text_position, textcoords=text_coordinates, ha=horizontal, va=vertical, fontsize=10, fontweight="bold", color="#203400", bbox={"boxstyle": "round,pad=0.45", "facecolor": "#F6FAEF", "edgecolor": "#4B7600", "alpha": 0.98}, arrowprops={"arrowstyle": "->", "color": "#4B7600", "lw": 1.3}, zorder=7).set_gid(f"{gid}-label")
 
-    Main-paper Figs. 1d and 2a-c supply the decade size/width axes, filled/open
-    circles and a distinct score diamond, shown here in NVIDIA green shades.
-    The pale green utility cone is geometric. With score_sequence results,
-    overlay Eq. (68)'s downward closure under the paper's monotonicity assumption.
-    Legacy summaries show only the tested points.
-    Open circles mean the threshold was not established, not proven failure.
-    Gray squares distinguish invalid or unmeasured shapes. Coordinates are
-    exact; jitter_seed is retained for compatibility but no jitter is applied.
 
-    The second figure's symmetric error bars are bootstrap standard deviations
-    for visualization.  Classification uses the separate one-sided lower bound,
-    so those error bars must not be read as the decision interval.
-    Pass ``ax`` to draw the capability plot in an existing subplot.
-    """
+def _plot_quops_individual_scan(summary_df: pd.DataFrame, *, title: str, label: str | None, threshold: float, figsize: tuple[float, float], dpi: int, ax=None, test_description: str = "Individual 95% tests"):
+    """Draw supplied shape decisions and the geometric utility cone."""
     import matplotlib.pyplot as plt
-    from matplotlib.ticker import FuncFormatter
-    required = {"width", "size", pass_column, "mean_polarization"}
+    from matplotlib.ticker import ScalarFormatter
+
+    plot_df = summary_df.copy().sort_values(["width", "size"])
+    if plot_df.empty:
+        raise ValueError("summary_df does not contain plottable rows")
+    for column in ("width", "size"):
+        plot_df[column] = plot_df[column].map(lambda value: _positive_integer(column, value))
+    plot_df["decision"] = plot_df["decision"].astype(str).str.capitalize()
+    if not plot_df["decision"].isin(["Pass", "Fail", "Invalid"]).all():
+        raise ValueError("shape decisions must be Pass, Fail or Invalid")
+
+    # Shade the geometric utility cone; each marker represents one measured shape.
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi, layout="constrained")
+    else:
+        fig = ax.figure
+    size_grid = np.geomspace(max(1.0, plot_df["size"].min() / 1.8), plot_df["size"].max() * 1.8, 300)
+    ax.fill_between(size_grid, size_grid ** (1 / 3), np.sqrt(size_grid), color="#EDF5DD", label=r"Utility cone: $w^2 \leq s \leq w^3$", zorder=0).set_gid("quops-utility-cone")
+    ax.plot(size_grid, np.sqrt(size_grid), color="#91AD63", linewidth=1.0, linestyle="--", label=r"$s=w^2$")
+    ax.plot(size_grid, size_grid ** (1 / 3), color="#91AD63", linewidth=1.0, linestyle=":", label=r"$s=w^3$")
+
+    # Use the supplied test decisions to distinguish the tested shapes.
+    for decision, color, marker in [("Pass", "#76B900", "o"), ("Fail", "#C5523F", "X"), ("Invalid", "#777777", "s")]:
+        points = plot_df.loc[plot_df["decision"].eq(decision)]
+        if not points.empty:
+            ax.scatter(points["size"], points["width"], s=85, marker=marker, color=color, edgecolors="white", linewidths=0.8, label=decision, zorder=3).set_gid(f"quops-{decision.lower()}")
+
+    # Show circuit size horizontally and qubit width vertically, as in the paper.
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(size_grid[0], size_grid[-1])
+    ax.set_ylim(min(size_grid[0] ** (1 / 3), plot_df["width"].min()) / 1.15, max(np.sqrt(size_grid[-1]), plot_df["width"].max()) * 1.15)
+    ax.set_xticks(sorted(plot_df["size"].unique()))
+    ax.set_yticks(sorted(plot_df["width"].unique()))
+    ax.xaxis.set_major_formatter(ScalarFormatter())
+    ax.yaxis.set_major_formatter(ScalarFormatter())
+    ax.minorticks_off()
+    ax.set_xlabel("Circuit size, s (QUOPS)")
+    ax.set_ylabel("Circuit width, w (qubits)")
+    heading = title if label is None else f"{title}\n{label}"
+    ax.set_title(f"{heading}\n{test_description}; threshold = {threshold:.4f}")
+    ax.grid(alpha=0.2)
+    ax.set_axisbelow(True)
+
+    # Select the largest passing in-cone size using the same rule as the rate panel.
+    score, best_shape = quops_score_from_summary(plot_df.assign(passes=plot_df["decision"].eq("Pass")))
+    if best_shape is not None:
+        score_label = "QUOPS score" if "multiplicity" in plot_df and plot_df["multiplicity"].eq("hochberg").all() else "Largest tested pass"
+        ax.scatter([best_shape[1]], [best_shape[0]], s=165, marker="D", facecolors="#4B7600", edgecolors="#203400", linewidths=1.3, label=f"{score_label}: {score:,} QUOPS ({best_shape[0]} qubits)", zorder=6).set_gid("quops-score")
+    else:
+        ax.text(0.03, 0.97, "Tested score: 0\nNo passing in-cone shape", transform=ax.transAxes, ha="left", va="top", fontsize=10, color="#555555").set_gid("quops-score-label")
+    ax.legend(loc="lower right", framealpha=0.95)
+    return fig
+
+
+def _quops_scan_options(summary_df, pass_column, threshold, individual_tests):
+    """Validate a scan's table format and explicitly declared test settings."""
+    hochberg_results = "multiplicity" in summary_df and summary_df["multiplicity"].eq("hochberg").any()
+    if hochberg_results and not summary_df["multiplicity"].eq("hochberg").all():
+        raise ValueError("a scan cannot mix Hochberg and other test families")
+    decision_plot = individual_tests or hochberg_results
+    required = {"width", "size", "decision"} if decision_plot else {"width", "size", pass_column, "mean_polarization"}
     if not required.issubset(summary_df.columns):
         raise ValueError(f"summary_df is missing required columns: {sorted(required - set(summary_df.columns))}")
     threshold_values = pd.to_numeric(summary_df["threshold"], errors="coerce").dropna().unique() if "threshold" in summary_df.columns else np.array([])
@@ -1930,6 +2188,17 @@ def plot_quops_scan(summary_df: pd.DataFrame, *, title: str = "QUOPS capability"
     threshold = _validate_threshold(float(threshold_values[0]) if threshold is None and len(threshold_values) == 1 else QUOPS_THRESHOLD if threshold is None else threshold)
     if len(threshold_values) and not np.allclose(threshold_values, threshold, rtol=0.0, atol=1.0e-12):
         raise ValueError("plot threshold must match the threshold used for shape decisions")
+    test_description = "Individual 95% tests"
+    if hochberg_results:
+        alpha_values = pd.to_numeric(summary_df["alpha"], errors="raise").unique()
+        if len(alpha_values) != 1:
+            raise ValueError("a Hochberg plot requires one common family error budget")
+        test_description = f"Hochberg tests; family error budget = {_probability('alpha', alpha_values[0]):.0%}"
+    return decision_plot, threshold, test_description
+
+
+def _prepare_quops_scan(summary_df, pass_column):
+    """Normalize legacy summary rows once for capability and polarization panels."""
     plot_df = summary_df.copy().sort_values(["width", "size"])
     for column in ("width", "size", "mean_polarization"):
         plot_df[column] = pd.to_numeric(plot_df[column], errors="coerce")
@@ -1946,9 +2215,20 @@ def plot_quops_scan(summary_df: pd.DataFrame, *, title: str = "QUOPS capability"
         invalid_mask |= ~plot_df["measured"].fillna(False).eq(True)
     plot_df["inference_invalid"] = invalid_mask | ~np.isfinite(plot_df["mean_polarization"])
     plot_df[pass_column] = plot_df[pass_column].fillna(False).eq(True) & ~plot_df["inference_invalid"]
+    return plot_df
+
+
+def _quops_plot_size_limits(plot_df):
+    """Return the common decade range used by legacy scan diagnostics."""
+    return 1.0, 10.0 ** max(1, math.ceil(math.log10(float(plot_df["size"].max()))))
+
+
+def _plot_quops_capability(plot_df, *, title, label, pass_column, figsize, dpi, ax=None):
+    """Draw the legacy capability panel without creating unused diagnostics."""
+    import matplotlib.pyplot as plt
     score, best_shape = quops_score_from_summary(plot_df, pass_column=pass_column)
     paper_protocol = "score_passes" in plot_df
-    x_min, x_max = 1.0, 10.0 ** max(1, math.ceil(math.log10(float(plot_df["size"].max()))))
+    x_min, x_max = _quops_plot_size_limits(plot_df)
     x_padding = 10.0**0.02
     y_min, y_max = 1.0 / x_padding, 10.0 ** max(1, math.ceil(math.log10(float(plot_df["width"].max())))) * x_padding
     x_grid = np.geomspace(x_min, x_max, 500)
@@ -1956,7 +2236,7 @@ def plot_quops_scan(summary_df: pd.DataFrame, *, title: str = "QUOPS capability"
     cone_upper = x_grid**0.5
     standalone = ax is None
     if standalone:
-        fig_shape, ax = plt.subplots(figsize=shape_figsize, dpi=dpi)
+        fig_shape, ax = plt.subplots(figsize=figsize, dpi=dpi)
     else:
         fig_shape = ax.figure
     _paper_plot_axes(ax, numeric_ticks=True)
@@ -1998,7 +2278,16 @@ def plot_quops_scan(summary_df: pd.DataFrame, *, title: str = "QUOPS capability"
     ax.legend(loc="upper left", frameon=True, facecolor="white", edgecolor="#cccccc", framealpha=0.9, fontsize=9)
     if standalone:
         fig_shape.tight_layout()
-    fig_polarization, ax = plt.subplots(figsize=polarization_figsize, dpi=dpi)
+    return fig_shape
+
+
+def _plot_quops_polarization(plot_df, *, threshold, label, figsize, dpi):
+    """Draw the requested polarization diagnostic with bootstrap standard deviations."""
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
+    x_min, x_max = _quops_plot_size_limits(plot_df)
+    x_padding = 10.0**0.02
+    fig_polarization, ax = plt.subplots(figsize=figsize, dpi=dpi)
     ax.set_prop_cycle(color=["#76B900", "#4B7600", "#9ACB44", "#345200", "#B4D984", "#608F20"])
     for width, group in plot_df.groupby("width"):
         group = group.sort_values("size")
@@ -2015,7 +2304,79 @@ def plot_quops_scan(summary_df: pd.DataFrame, *, title: str = "QUOPS capability"
     ax.grid(True, which="major", alpha=0.25)
     ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
     fig_polarization.tight_layout()
-    return fig_shape, fig_polarization
+    return fig_polarization
+
+
+def _draw_quops_scan(summary_df, *, decision_plot, title, label, pass_column, threshold, figsize, dpi, ax=None, test_description="Individual 95% tests"):
+    """Draw one scan panel and retain prepared legacy rows for an optional diagnostic."""
+    if decision_plot:
+        return _plot_quops_individual_scan(summary_df, title=title, label=label, threshold=threshold, figsize=figsize, dpi=dpi, ax=ax, test_description=test_description), None
+    plot_df = _prepare_quops_scan(summary_df, pass_column)
+    return _plot_quops_capability(plot_df, title=title, label=label, pass_column=pass_column, figsize=figsize, dpi=dpi, ax=ax), plot_df
+
+
+def plot_quops_scan(summary_df: pd.DataFrame, rate_df: pd.DataFrame | None = None, *, title: str = "QUOPS capability", label: str | None = None, pass_column: str = "passes", threshold: float | None = None, jitter_seed: int = 123, shape_figsize: tuple[float, float] = (9.0, 4.8), polarization_figsize: tuple[float, float] = (9.0, 4.2), dpi: int = 140, ax=None, individual_tests: bool = False):
+    """Plot measured capability points and polarization-versus-size diagnostics.
+
+    Main-paper Figs. 1d and 2a-c supply the decade size/width axes, filled/open
+    circles and a distinct score diamond, shown here in NVIDIA green shades.
+    The pale green utility cone is geometric. With score_sequence results,
+    overlay Eq. (68)'s downward closure under the paper's monotonicity assumption.
+    Legacy summaries show only the tested points.
+    Open circles mean the threshold was not established, not proven failure.
+    Gray squares distinguish invalid or unmeasured shapes. Coordinates are
+    exact; jitter_seed is retained for compatibility but no jitter is applied.
+
+    The second figure's symmetric error bars are bootstrap standard deviations
+    for visualization.  Classification uses the separate one-sided lower bound,
+    so those error bars must not be read as the decision interval.
+    Pass ``ax`` to draw the capability plot in an existing subplot.
+
+    With ``individual_tests=True``, accept the notebook's table with width,
+    size and decision columns (Pass/Fail/Invalid) and return one scan Figure.
+    Otherwise return the existing (scan, polarization) pair of Figures.
+
+    Supply ``rate_df`` from calculate_quops_rate as the second argument to
+    return one Figure with the scan and simulator QUOPS/s side by side.
+    Rate rows are matched by (width, size). Omit ax for this combined layout.
+
+    A table from hochberg_test automatically selects the shape-decision plot,
+    labels its family error budget, and uses its adjusted passes in both panels.
+    Matching diamonds identify the largest passing in-cone size and its rate.
+    The score appears in the lower-right legend; the rate has a numerical callout.
+    The individual_tests flag is unnecessary for this table. No downward
+    closure or gated score is inferred from these standalone Hochberg results.
+    """
+    import matplotlib.pyplot as plt
+    decision_plot, threshold, test_description = _quops_scan_options(summary_df, pass_column, threshold, individual_tests)
+
+    # Match the separately calculated rates to the tested shapes before creating the two panels.
+    if rate_df is not None:
+        if ax is not None:
+            raise ValueError("omit ax when supplying rate_df; the combined scan creates two axes")
+        rate_columns = {"width", "size", "omega_simulated"}
+        if not rate_columns.issubset(rate_df.columns):
+            raise ValueError(f"rate_df is missing required columns: {sorted(rate_columns - set(rate_df.columns))}")
+        rate_summary = summary_df.drop(columns=["omega_simulated"], errors="ignore").merge(rate_df[["width", "size", "omega_simulated"]], on=["width", "size"], how="left", validate="one_to_one")
+        if decision_plot:
+            rate_summary["decision"] = rate_summary["decision"].astype(str).str.lower()
+            rate_summary[pass_column] = rate_summary["decision"].eq("pass")
+        fig, axes = plt.subplots(1, 2, figsize=(2 * shape_figsize[0], shape_figsize[1]), dpi=dpi, layout="constrained")
+        _draw_quops_scan(summary_df, decision_plot=decision_plot, title=title, label=label, pass_column=pass_column, threshold=threshold, figsize=shape_figsize, dpi=dpi, ax=axes[0], test_description=test_description)
+        rate_values = pd.to_numeric(rate_summary["omega_simulated"], errors="coerce")
+        if (np.isfinite(rate_values) & rate_values.gt(0.0)).any():
+            plot_quops_rate(rate_summary, pass_column=pass_column, label=label, dpi=dpi, ax=axes[1])
+        else:
+            axes[1].set_title("Simulator QUOPS throughput")
+            axes[1].set_xlabel("Circuit size, s (QUOPS)")
+            axes[1].set_ylabel("Simulator throughput (QUOPS/s)")
+            axes[1].text(0.5, 0.5, "No positive finite rates available", transform=axes[1].transAxes, ha="center", va="center")
+        return fig
+
+    fig_shape, plot_df = _draw_quops_scan(summary_df, decision_plot=decision_plot, title=title, label=label, pass_column=pass_column, threshold=threshold, figsize=shape_figsize, dpi=dpi, ax=ax, test_description=test_description)
+    if decision_plot:
+        return fig_shape
+    return fig_shape, _plot_quops_polarization(plot_df, threshold=threshold, label=label, figsize=polarization_figsize, dpi=dpi)
 
 
 def plot_quops_timing(summary_df: pd.DataFrame, *, time_column: str = "tau_wall_seconds", label: str | None = None, figsize: tuple[float, float] = (9.0, 4.2), dpi: int = 140):
@@ -2134,16 +2495,18 @@ def plot_quops_rate(summary_df: pd.DataFrame, *, rate_column: str = "omega_simul
         selected = plot_df[(plot_df["width"] == best_shape[0]) & (plot_df["size"] == best_shape[1])]
         if not selected.empty:
             selected_rate = float(selected.iloc[0][rate_column])
-            ax.scatter([best_shape[1]], [selected_rate], s=80, marker="d", facecolors="#4B7600", edgecolors="#222222", linewidths=0.8, zorder=4, label=f"Rate at ${score_symbol}={score}$: {selected_rate:.3g} QUOPS/sec").set_gid("quops-rate-at-score")
+            rate_text = f"{selected_rate:,.2f}" if selected_rate >= 1.0 else f"{selected_rate:.3g}"
+            _highlight_quops_point(ax, best_shape[1], selected_rate, f"Rate at score\n{rate_text} QUOPS/s", gid="quops-rate-at-score", legend_label=f"Rate at ${score_symbol}={score}$")
         else:
             ax.text(0.97, 0.04, f"Rate at ${score_symbol}={score}$ unavailable", transform=ax.transAxes, ha="right", fontsize=9, color="#555555")
     else:
-        ax.text(0.97, 0.04, "No gated score pass" if "score_passes" in source_df else "No approximate pass in this scan", transform=ax.transAxes, ha="right", fontsize=9, color="#555555")
+        ax.text(0.97, 0.04, "No gated score pass" if "score_passes" in source_df else "Rate at score unavailable\nNo passing in-cone shape", transform=ax.transAxes, ha="right", fontsize=9, color="#555555")
     ax.set_xlabel("Circuit size, $s$ (QUOPS)", fontsize=11)
-    ax.set_ylabel("Rate (QUOPS/sec)", fontsize=11)
-    ax.set_title("QUOPS rate by shape" if label is None else f"QUOPS rate by shape\n{label}", fontsize=11)
+    heading = "Simulator QUOPS throughput" if rate_column == "omega_simulated" else "QUOPS rate by shape"
+    ax.set_ylabel("Simulator throughput (QUOPS/s)" if rate_column == "omega_simulated" else "Rate (QUOPS/s)", fontsize=11)
+    ax.set_title(heading if label is None else f"{heading}\n{label}", fontsize=11)
     if rate_column == "omega_simulated":
-        ax.text(0.97, 0.96, "Simulator proxy", transform=ax.transAxes, ha="right", va="top", fontsize=9, color="#555555")
+        ax.text(0.97, 0.96, "BR/RR sampling-call proxy\nREF excluded", transform=ax.transAxes, ha="right", va="top", fontsize=9, color="#555555")
     if omitted:
         ax.text(0.01, 0.01, f"{omitted} invalid/nonpositive rate row(s) omitted", transform=ax.transAxes, fontsize=8, color="#555555", va="bottom")
     ax.legend(loc="upper left", frameon=True, facecolor="white", edgecolor="#cccccc", framealpha=0.9, fontsize=9)
@@ -2153,14 +2516,14 @@ def plot_quops_rate(summary_df: pd.DataFrame, *, rate_column: str = "omega_simul
 
 
 def plot_quops_results(summary_df: pd.DataFrame, *, label: str | None = None):
-    """Return the notebook's capability and simulator-rate figure side by side."""
+    """Return capability and simulator-rate panels from a combined summary table."""
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5.2), dpi=140)
     if label is not None:
         fig.suptitle(label, fontsize=11)
-    _, polarization = plot_quops_scan(summary_df, ax=axes[0])
-    plt.close(polarization)
+    decision_plot, threshold, description = _quops_scan_options(summary_df, "passes", None, False)
+    _draw_quops_scan(summary_df, decision_plot=decision_plot, title="QUOPS capability", label=None, pass_column="passes", threshold=threshold, figsize=(9.0, 4.8), dpi=140, ax=axes[0], test_description=description)
     plot_quops_rate(summary_df, ax=axes[1])
     fig.tight_layout()
     return fig
@@ -2252,7 +2615,7 @@ def validate_runtime() -> dict:
     try:
         kernel = build_kernel([], [], [], [], 1)
     except TypeError as exc:
-        raise RuntimeError('This CUDA-Q build lacks atomic quantum regions. Use the pinned runtime documented in quops.ipynb; do not silently disable MCFE boundaries.') from exc
+        raise RuntimeError('This CUDA-Q build lacks atomic quantum regions. Use requirements.txt and the README setup instructions; do not silently disable MCFE boundaries.') from exc
     if not getattr(kernel, 'atomic_quantum_region', False):
         raise RuntimeError('The CUDA-Q runtime did not preserve the requested atomic quantum region.')
     return {'atomic_quantum_region': True, 'target': str(cudaq.get_target()), 'timing_scope': 'sum_of_M1_M2_sample_call_spans', 'is_hardware_rate': False}
@@ -2405,6 +2768,8 @@ def run_quops(*, output='results/quops_run.csv', shapes=None, target='qpp-cpu', 
         for shape in shapes:
             width, depth, size, zeta = shape['width'], shape['depth'], shape['size'], shape['zeta']
             for circuit_index in range(num_circuits):
+                if all(archive.contains(width, size, circuit_index, mirror_index) for mirror_index in range(num_mirrors)):
+                    continue
                 circuit_seed = deterministic_seed(seed, width, size, circuit_index)
                 circuit = sample_quops_circuit(width, depth, zeta, seed=circuit_seed)
                 inverse = adjoint_C(circuit)
@@ -2509,7 +2874,7 @@ def show_p2(counts, code):
 
     structural = {"call", "repeat", "map_children", "relocate", "establish_support", "establish_topological_record"}
     table = pd.DataFrame([{"instruction": operation, "count": count} for operation, count in sorted(counts.operation_counts.items()) if operation not in structural and count], columns=["instruction", "count"])
-    metrics = {"T-state requests": counts.resource_requests.get("t_state", 0), "Syndrome extractions": counts.syndrome_rounds, "Peak encoded blocks": counts.patches_peak, "Carriers in peak block templates": counts.patches_peak * code.block.size}
+    metrics = {"Resource requests": counts.operation_counts.get("resource_request", 0), "Syndrome extractions": counts.syndrome_rounds, "Peak live blocks (including injection)": counts.patches_peak, "Carriers in peak block templates": counts.patches_peak * code.block.size}
     return _show(metrics, table, title=f"P2: {code.name} encoded resources", x="instruction", y="count", xlabel="Static Fabric instruction instances (log scale)", color="#76B900")
 
 
@@ -2634,7 +2999,6 @@ def calibration_main():
     args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     print(json.dumps({"output": str(args.output), "results": report["results"], "degenerate_case": report["two_circuit_rare_good_case"]}, indent=2))
 
-
 def main():
     """Dispatch physical acquisition or known-channel inference calibration."""
     if sys.argv[1:2] == ["calibrate"]:
@@ -2648,7 +3012,7 @@ def main():
 # Public notebook imports
 # ===========================================================================
 
-__all__ = ['BR_kernel', 'DEFAULT_FAMILYWISE_ALPHA', 'MCFE_ESTIMATORS', 'MIN_BOOTSTRAP_TAIL_DRAWS', 'QUOPS_THRESHOLD', 'REF_kernel', 'RR_kernel', 'RunArchive', 'ShapePolarizationData', 'adjoint_C', 'atomic_write_json', 'bootstrap_lower_bound', 'bootstrap_polarization', 'calibrate', 'canonical_json', 'counts_dict', 'default_shape_schedule', 'describe_noise', 'deterministic_seed', 'effective_polarization_from_counts', 'enumerate_shapes', 'file_sha256', 'hamming_distance', 'in_utility_cone', 'json_safe', 'kernel_manifest', 'make_depolarizing_noise', 'make_helios1_noise', 'mcfe_polarization', 'normalized_mcfe_polarization', 'omega_simulated', 'pass_statistics', 'plot_p0_comparison', 'plot_p1_capacity', 'plot_qec_overhead', 'plot_quops_rate', 'plot_quops_results', 'plot_quops_scan', 'plot_quops_timing', 'quops_rate', 'quops_score_from_summary', 'randomized_compilation', 'run_quops', 'sample_known_channel_data', 'sample_mcfe_caps', 'sample_quops_arrays', 'sample_quops_circuit', 'shape_size', 'show_p0', 'show_p2', 'software_manifest', 'summarize_quops_runs', 'utility_cone_bounds', 'validate_inference_config', 'validate_runtime']
+__all__ = ['BR_kernel', 'DEFAULT_FAMILYWISE_ALPHA', 'MCFE_ESTIMATORS', 'MIN_BOOTSTRAP_TAIL_DRAWS', 'QUOPS_THRESHOLD', 'REF_kernel', 'RR_kernel', 'RunArchive', 'ShapePolarizationData', 'adjoint_C', 'atomic_write_json', 'bootstrap_lower_bound', 'bootstrap_polarization', 'calculate_gamma_hat_ws', 'calculate_gamma_lower', 'calculate_mean_lambdas', 'calculate_p_value', 'calculate_quops_rate', 'calculate_sigma', 'calibrate', 'canonical_json', 'counts_dict', 'default_shape_schedule', 'describe_noise', 'deterministic_seed', 'effective_polarization_from_counts', 'enumerate_shapes', 'file_sha256', 'hamming_distance', 'hochberg_test', 'in_utility_cone', 'json_safe', 'kernel_manifest', 'make_depolarizing_noise', 'make_helios1_noise', 'mcfe_polarization', 'normalized_mcfe_polarization', 'omega_simulated', 'pass_statistics', 'plot_p0_comparison', 'plot_p1_capacity', 'plot_qec_overhead', 'plot_quops_rate', 'plot_quops_results', 'plot_quops_scan', 'plot_quops_timing', 'quops_rate', 'quops_score_from_summary', 'randomized_compilation', 'run_quops', 'sample_known_channel_data', 'sample_mcfe_caps', 'sample_quops_arrays', 'sample_quops_circuit', 'shape_size', 'show_p0', 'show_p2', 'software_manifest', 'summarize_quops_runs', 'utility_cone_bounds', 'validate_inference_config', 'validate_runtime']
 
 
 if __name__ == "__main__":

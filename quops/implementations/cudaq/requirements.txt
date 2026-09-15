@@ -1,0 +1,8 @@
+# Direct dependencies and notebook tools; Linux/Python setup: README.md.
+cudaq==0.16.0
+numpy==2.2.6
+pandas==3.0.5
+matplotlib==3.11.1
+ipython==9.17.1
+ipykernel==7.3.0
+jupyterlab==4.5.10
