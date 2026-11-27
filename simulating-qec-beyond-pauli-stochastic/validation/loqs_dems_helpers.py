@@ -1,0 +1,231 @@
+from collections import Counter
+import numpy as np
+import pygsti
+from pygsti.extras.dem_construction import pygsti_object_builders as obj
+import stim
+from pygsti.extras.dem_construction import dem_tools as dems
+import scipy as sp
+import pygsti.tools.errgenproptools as eprop
+
+from pygsti.baseobjs.statespace import QubitSpace as _QubitSpace
+import pygsti.baseobjs as _bo
+from pygsti.baseobjs.errorgenlabel import GlobalElementaryErrorgenLabel as _GlobalElementaryErrorgenLabel, \
+                                          LocalElementaryErrorgenLabel as _LocalElementaryErrorgenLabel
+import pygsti.tools.lindbladtools as lbd
+
+from itertools import combinations, product
+
+def build_error_dict(twoQ_depol_rate, damping_fraction, idle_z_rate, h_errors):
+    twoQpaulis = [''.join(s) for s in product(['I','X','Y','Z'], repeat=2)][1:]
+    oneQ_depol_rate = 0.1*twoQ_depol_rate
+    error_rates_dict = {}
+    error_rates_dict['Gi'] = {('S','X'):oneQ_depol_rate/3,('S','Y'):oneQ_depol_rate/3,('S','Z'):oneQ_depol_rate/3,('A','X','Y'):damping_fraction*oneQ_depol_rate,('H','Z'):idle_z_rate}
+    error_rates_dict['Gh'] = {('S','X'):oneQ_depol_rate/3,('S','Y'):oneQ_depol_rate/3,('S','Z'):oneQ_depol_rate/3}
+    error_rates_dict['Gcnot'] = {('S',p):twoQ_depol_rate/15 for p in twoQpaulis}
+    error_rates_dict['Gcnot'].update(h_errors['Gcnot']) #some reasonably physical errors for the CNOT gate
+    error_rates_dict['Gh'].update(h_errors['Gh'])
+    return error_rates_dict
+
+def build_error_dict2(twoQ_depol_rate, damping_fraction, idle_z_rate, h_errors):
+    twoQpaulis = [''.join(s) for s in product(['I','X','Y','Z'], repeat=2)][1:]
+    oneQ_depol_rate = twoQ_depol_rate
+    error_rates_dict = {}
+    error_rates_dict['Gi'] = {('S','X'):oneQ_depol_rate/3,('S','Y'):oneQ_depol_rate/3,('S','Z'):oneQ_depol_rate/3,('A','X','Y'):damping_fraction*oneQ_depol_rate,('H','Z'):idle_z_rate}
+    error_rates_dict['Gh'] = {('S','X'):oneQ_depol_rate/3,('S','Y'):oneQ_depol_rate/3,('S','Z'):oneQ_depol_rate/3}
+    error_rates_dict['Gcnot'] = {('S',p):twoQ_depol_rate/15 for p in twoQpaulis}
+    error_rates_dict['Gcnot'].update(h_errors['Gcnot']) #some reasonably physical errors for the CNOT gate
+    error_rates_dict['Gh'].update(h_errors['Gh'])
+    return error_rates_dict
+
+def generate_random_sparse_sh_error_model(nqs, num_sh_terms, s_params, h_params, seed=1234):
+    rng = np.random.default_rng(seed)
+    state_space = _QubitSpace.cast(nqs)
+    
+    #create an error generator basis according the our weight specs
+    errorgen_basis = _bo.CompleteElementaryErrorgenBasis('PP', state_space, elementary_errorgen_types=['S','H'],
+                                                         default_label_type='local')
+    
+    #Get the labels, broken out by sector, of each of the error generators in this basis.
+    errgen_labels_H = lbd._sort_errorgen_labels(errorgen_basis.sublabels('H'))
+    errgen_labels_S = lbd._sort_errorgen_labels(errorgen_basis.sublabels('S'))
+    
+    edict = {}
+    #pick h error gens and sample rates
+    chosen_labels_H = rng.choice(errgen_labels_H, num_sh_terms[1] ,replace=False)
+    num_H_rates = num_sh_terms[1]
+    edict.update({lbl: val for lbl,val in zip(errgen_labels_H, rng.normal(loc=h_params[0], scale=h_params[1], size = num_H_rates))})
+    #pick s error gens and generate random s rates
+    num_S_rates = num_sh_terms[0]
+    chosen_labels_S = rng.choice(errgen_labels_S, num_sh_terms[0] ,replace=False)    
+    random_S_vals = [np.abs(j) for j in rng.normal(loc=s_params[0], scale=s_params[1], size = num_S_rates)]
+    edict.update({lbl: val for lbl,val in zip(chosen_labels_S, random_S_vals)})
+    
+    return edict
+
+def generate_random_sparse_shca_error_model(nqs, num_shca_terms, s_params, h_params, seed=1234):
+    rng = np.random.default_rng(seed)
+    state_space = _QubitSpace.cast(nqs)
+    
+    #create an error generator basis according the our weight specs
+    errorgen_basis = _bo.CompleteElementaryErrorgenBasis('PP', state_space, elementary_errorgen_types=['S','H'],
+                                                         default_label_type='local')
+    
+    #Get the labels, broken out by sector, of each of the error generators in this basis.
+    errgen_labels_H = lbd._sort_errorgen_labels(errorgen_basis.sublabels('H'))
+    errgen_labels_S = lbd._sort_errorgen_labels(errorgen_basis.sublabels('S'))
+    
+    edict = {}
+    sa_edict = {}
+    sc_edict = {}
+    #pick h error gens and sample rates
+    chosen_labels_H = rng.choice(errgen_labels_H, num_shca_terms[1] ,replace=False)
+    num_H_rates = num_shca_terms[1]
+    edict.update({lbl: sign*val for lbl,sign, val in zip(errgen_labels_H, rng.choice([-1, 1], size = num_H_rates), rng.normal(loc=h_params[0], scale=h_params[1], size = num_H_rates))})
+    #pick s error gens and generate random s rates
+    num_S_rates = num_shca_terms[0]
+    chosen_labels_S = [errgen_labels_S[i] for i in rng.choice(len(errgen_labels_S), num_shca_terms[0] ,replace=False)]  
+    random_S_vals = [np.abs(j) for j in rng.normal(loc=s_params[0], scale=s_params[1], size = num_S_rates)]
+
+    random_S_vals1 = [np.abs(j) for j in rng.normal(loc=s_params[0], scale=s_params[1], size = num_S_rates)]
+    random_S_vals2 = [np.abs(j) for j in rng.normal(loc=s_params[0], scale=s_params[1], size = num_S_rates)]
+    edict.update({lbl: val1+val2 for lbl,val1,val2 in zip(chosen_labels_S, random_S_vals1, random_S_vals2)})
+    
+    sa_edict.update({lbl: val for lbl,val in zip(chosen_labels_S, random_S_vals1)})
+    sc_edict.update({lbl: val for lbl,val in zip(chosen_labels_S, random_S_vals2)})
+
+    #I just want to generate the valid C and A labels, given some valid S labels
+    allowed_paulis = [eeg.basis_element_labels[0] for eeg in chosen_labels_S]
+    pauli_pairs = list(combinations(allowed_paulis, 2))
+    
+    chosen_paulis_C = [pauli_pairs[i] for i in rng.choice(len(pauli_pairs), num_shca_terms[2], replace=False)]
+    
+    chosen_labels_C = []
+    for ps in chosen_paulis_C:
+        lbl = _LocalElementaryErrorgenLabel('C', ps)
+        chosen_labels_C.append(lbl)
+        #choose their rates
+        max_rate = np.sqrt(sc_edict[_LocalElementaryErrorgenLabel('S', (ps[0],))]*sc_edict[_LocalElementaryErrorgenLabel('S', (ps[1],))])
+        rate = rng.choice([-1, 1])*np.random.uniform(0, max_rate)
+        edict[lbl] = rate
+    
+    chosen_paulis_A = [pauli_pairs[i] for i in rng.choice(len(pauli_pairs), num_shca_terms[3], replace=False)]
+    
+    chosen_labels_A = []
+    for ps in chosen_paulis_A:
+        lbl = _LocalElementaryErrorgenLabel('A', ps)
+        chosen_labels_A.append(lbl)
+        #choose their rates
+        max_rate = np.sqrt(sa_edict[_LocalElementaryErrorgenLabel('S', (ps[0],))]*sa_edict[_LocalElementaryErrorgenLabel('S', (ps[1],))])
+        rate = rng.choice([-1, 1])*np.random.uniform(0, max_rate)
+        edict[lbl] = rate
+    
+    return edict
+
+def compute_logical_outcome(measurement_outcomes):
+    data_outcomes = [v[0] for v in measurement_outcomes.values()]
+    return sum(data_outcomes) % 2
+
+def process_se_data_loqs(outcomes_list, n_rounds, n_syndromes):
+    #xor appropriate bits together
+    outcomes = [''.join([str(j) for j in bl[:n_syndromes]]+[str((bl[(r-1)*n_syndromes+k]+bl[r*n_syndromes+k])%2) for k in range(n_syndromes) for r in range(1, n_rounds)]+[str(bl[-1])]) for bl in outcomes_list]
+    #create a counter 
+    return Counter(outcomes)
+
+#if Iz: create new qubit, take note of what has been measured, update mapping
+def expand_circuit(c, padding=False):
+    qubit_mapping = {q:[q] for q in c.line_labels}
+    q_idx = len(qubit_mapping)-1
+    new_c = []
+    measurements = []
+    #first let's pad with idles
+    padded_c = []
+    for idx in range(len(c)):
+        #print(c[idx])
+        padded_c.append(c.layer_with_idles(idx, idle_gate_name='Gi'))
+    padded_c = pygsti.circuits.circuit.Circuit(padded_c)
+    #serialize
+    if padding:
+        serial_c = padded_c.serialize()
+    else:
+        serial_c = c.serialize()
+    #for each 
+    for gate in serial_c:
+        #if not Iz: add it, with proper qubit map
+        if gate.name=='Imrz':
+            q = gate.qubits[0] #TODO
+            measurements.append('Q'+str(qubit_mapping[q][-1]) if len(qubit_mapping[q])>1 else qubit_mapping[q][-1])
+            q_idx +=1
+            #update qubit mapping
+            qubit_mapping[q].append(q_idx)
+        else:
+            g = gate.name
+            qs = ['Q'+str(qubit_mapping[q][-1]) if len(qubit_mapping[q])>1 else qubit_mapping[q][-1] for q in gate.qubits]
+            new_c.append([pygsti.baseobjs.label.Label(g, qs)])
+            
+    #TODO at the end of the circuit, need to add a final measurement of the data qubits. 
+    new_c = pygsti.circuits.circuit.Circuit(new_c)
+    return new_c, measurements, qubit_mapping
+
+def compute_attenuations_from_dem(dem):
+    attenuations = np.zeros(2**dem.num_detectors, dtype=float)
+    all_bitstrings = np.array([[int(bit) for bit in format(n, f'0{dem.num_detectors}b')]for n in range(2**dem.num_detectors)])
+    for event in dem:
+        prob = event.args_copy()[0]
+        targets = [target.val for target in event.targets_copy()]
+        event = [1 if (dem.num_detectors-idx-1) in targets else 0 for idx in range(dem.num_detectors)]    
+        attenuation = -np.log(1-2*prob)
+        attenuations += attenuation * (1-(-1)**np.dot(all_bitstrings, event))/2
+    return attenuations
+
+def compute_polarizations_from_dem(dem):
+    attenuations = compute_attenuations_from_dem(dem)
+    polarizations = np.exp(-attenuations)
+    polarizations[0] = 1
+
+    return polarizations
+    
+def compute_outcome_distribution_from_dem(dem):
+    """
+    Compute the outcome distribution from a DEM using log and Hadamard transform.
+
+    Parameters:
+    - dem: a detector error model
+
+    Returns: 
+    - prob_estimate: array of 2^n probabilities, in increasing binary order
+    """
+    # Convert DEM to attenuations
+    attenuations = compute_attenuations_from_dem(dem)
+    
+    # Compute polarizations from attenuations
+    polarizations = np.exp(-attenuations)
+    polarizations[0] = 1
+
+    # Compute probabilities from polarizations
+    probabilities = sp.linalg.hadamard(2**dem.num_detectors) @ polarizations / 2**dem.num_detectors
+    
+    return probabilities
+
+def dem_to_event_probabilities(dem):
+    """
+    Convert a stim DEM object into a 2^n dimensional list of event probabilities. 
+
+    Parameters:
+    - dem: stim DEM object to convert to event probability list
+
+    Returns:
+    - dem_event_probabilities: 2^n dimensional array of dem event probabilities
+    """
+
+    n = dem.num_detectors
+    attenuations = np.zeros(2**n, dtype=float)
+    for event in dem:
+        probability = event.args_copy()[0]
+        targets = [target.val for target in event.targets_copy()]
+        idxs = [1 << target for target in targets]
+        idx = sum(idxs)
+        attenuations[idx] += -np.log(1-2*probability)
+
+    probabilities = 1/2 - 1/2*np.exp(-attenuations)
+    
+    return probabilities
